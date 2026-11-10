@@ -17,6 +17,9 @@
 #include <ArduinoJson.h>
 #include "WIFICredentials.h"
 
+// Processing of data
+#include <time.h>
+
 void setup()
 {
   Serial.begin(9600);
@@ -47,9 +50,12 @@ void displayPing() {
 // Connect to Wifi
 const unsigned long WIFI_CONNECT_RETRY_MS = 500;
 bool connectingToWifi = false;
+// Start at -1 to ignore inital connection
+int wifiDisconnects = -1;
 
 void connectToWifi() {
   if (connectingToWifi) return;
+  wifiDisconnects++;
 
   Serial.print("Attempting to connect WiFi");
   connectingToWifi = true;
@@ -97,6 +103,10 @@ void setupRTC() {
   Serial.println(unixTime);
 }
 
+const int unixEpochYear = 1900;
+// MST is 7 hours behind UTC
+const int utcToMST = 60 * 60 * 7;
+
 unsigned long getUnixTimestamp() {
   RTCTime currentTime;
   RTC.getTime(currentTime);
@@ -106,8 +116,31 @@ unsigned long getUnixTimestamp() {
 // Generate Json for Http send
 String generateJson() {
   JsonDocument document;
-  document["data"][0]["Unix Time Stamp"] = getUnixTimestamp();
-  document["data"][0]["Moisture Reading"] = 1.0 + sin(millis()); // Random
+
+  unsigned long rawUnix = getUnixTimestamp();
+  unsigned long mstUnix = rawUnix - utcToMST;
+
+  time_t timeUnix = (time_t)mstUnix;
+  struct tm *timeInfo = gmtime(&timeUnix);
+
+  // 11/10/2026
+  String dateString = String(timeInfo->tm_mon + 1) + "/"
+    + String(timeInfo->tm_mday) + "/"
+    + String(timeInfo->tm_year + unixEpochYear);
+  
+  // 5:14AM
+  String timeMinutesProper = (timeInfo->tm_min < 10 ? "0" : "") + String(timeInfo->tm_min);
+
+  String timePostFix = timeInfo->tm_hour >= 12 ? "PM" : "AM";
+  int timeHourProper = timeInfo->tm_hour % 12;
+  if (timeHourProper == 0) timeHourProper = 12; // When it turns to midnight / noon
+
+  String timeString = String(timeHourProper) + ":" + timeMinutesProper + timePostFix;
+
+  document["data"][0]["Date (MST)"] = dateString;
+  document["data"][0]["Time (MST)"] = timeString;
+  document["data"][0]["Wifi Disconnects"] = wifiDisconnects;
+  document["data"][0]["Unix Timestamp"] = rawUnix;
 
   String jsonOutput;
   serializeJson(document, jsonOutput);
@@ -140,7 +173,7 @@ bool postSheetDB() {
   return statusCode == 201;
 }
 
-// Runs every 5 seconds
+// Runs every 10 minutes
 void timerTick() {
   if (WiFi.status() != WL_CONNECTED) 
     connectToWifi();
@@ -148,6 +181,8 @@ void timerTick() {
     if (postSheetDB()) {
       Serial.println("Uploaded to spreadsheet!");
       displayPing();
+
+      wifiDisconnects = 0;
     } else {
       Serial.println("Failed ping!");
     }
@@ -155,11 +190,12 @@ void timerTick() {
 }
 
 // Code that runs the tick
-unsigned long prevTimerMS = 0;
-const unsigned long TEST_TIMER_MS = 5000;
+unsigned long prevTimerMS = -1;
+const unsigned long TEST_TIMER_MS = 1000 * 60 * 10;
 
 void loop() {
   unsigned long currentMS = millis();
+  if (prevTimerMS == -1) prevTimerMS = currentMS + TEST_TIMER_MS;
 
   if (currentMS - prevTimerMS >= TEST_TIMER_MS) {
     prevTimerMS = currentMS;
